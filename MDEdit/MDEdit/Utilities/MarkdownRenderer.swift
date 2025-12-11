@@ -5,39 +5,347 @@ import SwiftUI
 /// Uses native Apple frameworks only - no third-party dependencies.
 struct MarkdownRenderer {
     
+    // MARK: - Platform-specific colors
+    
+    #if os(macOS)
+    private static var codeBackgroundColor: Color {
+        Color(nsColor: NSColor.quaternaryLabelColor.withAlphaComponent(0.1))
+    }
+    private static var quoteColor: Color {
+        Color(nsColor: NSColor.secondaryLabelColor)
+    }
+    #else
+    private static var codeBackgroundColor: Color {
+        Color(uiColor: UIColor.secondarySystemFill)
+    }
+    private static var quoteColor: Color {
+        Color(uiColor: UIColor.secondaryLabel)
+    }
+    #endif
+    
     // MARK: - Markdown to AttributedString
     
     /// Renders Markdown text to an AttributedString for display
     /// - Parameter text: The Markdown source text
     /// - Returns: An AttributedString with Markdown formatting applied
     static func renderMarkdown(_ text: String) -> AttributedString {
-        do {
-            var options = AttributedString.MarkdownParsingOptions()
-            options.interpretedSyntax = .inlineOnlyPreservingWhitespace
+        var result = AttributedString()
+        let lines = text.components(separatedBy: "\n")
+        var inCodeBlock = false
+        var codeBlockContent = ""
+        
+        for (index, line) in lines.enumerated() {
+            // Handle fenced code blocks
+            if line.hasPrefix("```") {
+                if inCodeBlock {
+                    // End of code block
+                    var codeAttr = AttributedString(codeBlockContent)
+                    codeAttr.font = .system(size: 13, design: .monospaced)
+                    codeAttr.backgroundColor = codeBackgroundColor
+                    result.append(codeAttr)
+                    codeBlockContent = ""
+                    inCodeBlock = false
+                } else {
+                    // Start of code block
+                    inCodeBlock = true
+                }
+                if index < lines.count - 1 {
+                    result.append(AttributedString("\n"))
+                }
+                continue
+            }
             
-            // First try with full markdown parsing
-            let fullOptions = AttributedString.MarkdownParsingOptions(
-                interpretedSyntax: .full,
-                failurePolicy: .returnPartiallyParsedIfPossible
-            )
+            if inCodeBlock {
+                codeBlockContent += line + "\n"
+                continue
+            }
             
-            var attributed = try AttributedString(markdown: text, options: fullOptions)
+            // Parse the line and append to result
+            let parsedLine = parseLine(line)
+            result.append(parsedLine)
             
-            // Apply custom styling for better visual appearance
-            attributed = applyCustomStyling(to: attributed)
-            
-            return attributed
-        } catch {
-            // If parsing fails, return plain text
-            return AttributedString(text)
+            // Add newline between lines (except for the last line)
+            if index < lines.count - 1 {
+                result.append(AttributedString("\n"))
+            }
         }
+        
+        return result
     }
     
-    /// Applies custom styling to enhance the rendered Markdown
-    private static func applyCustomStyling(to attributedString: AttributedString) -> AttributedString {
-        // The AttributedString from Markdown already has proper formatting
-        // We can enhance specific elements if needed
-        return attributedString
+    /// Parses a single line of markdown and returns an AttributedString
+    private static func parseLine(_ line: String) -> AttributedString {
+        // Check for headers
+        if line.hasPrefix("######") {
+            return parseHeader(line, prefix: "######", fontSize: 14, weight: .medium)
+        } else if line.hasPrefix("#####") {
+            return parseHeader(line, prefix: "#####", fontSize: 15, weight: .medium)
+        } else if line.hasPrefix("####") {
+            return parseHeader(line, prefix: "####", fontSize: 16, weight: .semibold)
+        } else if line.hasPrefix("###") {
+            return parseHeader(line, prefix: "###", fontSize: 18, weight: .semibold)
+        } else if line.hasPrefix("##") {
+            return parseHeader(line, prefix: "##", fontSize: 22, weight: .bold)
+        } else if line.hasPrefix("#") {
+            return parseHeader(line, prefix: "#", fontSize: 28, weight: .bold)
+        }
+        
+        // Check for blockquote
+        if line.hasPrefix(">") {
+            var content = String(line.dropFirst())
+            if content.hasPrefix(" ") {
+                content = String(content.dropFirst())
+            }
+            var attr = parseInlineFormatting(content)
+            attr.foregroundColor = quoteColor
+            
+            // Add quote indicator
+            var quoteIndicator = AttributedString("│ ")
+            quoteIndicator.foregroundColor = quoteColor
+            return quoteIndicator + attr
+        }
+        
+        // Check for unordered list
+        if line.hasPrefix("- ") || line.hasPrefix("* ") {
+            let content = String(line.dropFirst(2))
+            var bullet = AttributedString("• ")
+            bullet.font = Font(regularFont())
+            let parsedContent = parseInlineFormatting(content)
+            return bullet + parsedContent
+        }
+        
+        // Check for ordered list
+        if let match = line.range(of: "^\\d+\\. ", options: .regularExpression) {
+            let number = String(line[match])
+            let content = String(line[match.upperBound...])
+            var numberAttr = AttributedString(number)
+            numberAttr.font = Font(regularFont())
+            let parsedContent = parseInlineFormatting(content)
+            return numberAttr + parsedContent
+        }
+        
+        // Check for checkbox list
+        if line.hasPrefix("- [ ] ") {
+            let content = String(line.dropFirst(6))
+            var checkbox = AttributedString("☐ ")
+            checkbox.font = Font(regularFont())
+            let parsedContent = parseInlineFormatting(content)
+            return checkbox + parsedContent
+        }
+        if line.hasPrefix("- [x] ") || line.hasPrefix("- [X] ") {
+            let content = String(line.dropFirst(6))
+            var checkbox = AttributedString("☑ ")
+            checkbox.font = Font(regularFont())
+            let parsedContent = parseInlineFormatting(content)
+            return checkbox + parsedContent
+        }
+        
+        // Check for horizontal rule
+        if line.trimmingCharacters(in: .whitespaces).range(of: "^(-{3,}|\\*{3,}|_{3,})$", options: .regularExpression) != nil {
+            var hr = AttributedString("───────────────────────────")
+            hr.foregroundColor = .secondary
+            return hr
+        }
+        
+        // Regular paragraph - parse inline formatting
+        return parseInlineFormatting(line)
+    }
+    
+    /// Parses a header line
+    private static func parseHeader(_ line: String, prefix: String, fontSize: CGFloat, weight: Font.Weight) -> AttributedString {
+        var content = String(line.dropFirst(prefix.count))
+        if content.hasPrefix(" ") {
+            content = String(content.dropFirst())
+        }
+        var attr = parseInlineFormatting(content)
+        attr.font = .system(size: fontSize, weight: weight)
+        return attr
+    }
+    
+    // MARK: - Platform-specific fonts
+    
+    #if os(macOS)
+    private static func boldFont(size: CGFloat = 15) -> NSFont {
+        return NSFont.boldSystemFont(ofSize: size)
+    }
+    
+    private static func italicFont(size: CGFloat = 15) -> NSFont {
+        let systemFont = NSFont.systemFont(ofSize: size)
+        return NSFontManager.shared.convert(systemFont, toHaveTrait: .italicFontMask)
+    }
+    
+    private static func boldItalicFont(size: CGFloat = 15) -> NSFont {
+        let boldFont = NSFont.boldSystemFont(ofSize: size)
+        return NSFontManager.shared.convert(boldFont, toHaveTrait: .italicFontMask)
+    }
+    
+    private static func regularFont(size: CGFloat = 15) -> NSFont {
+        return NSFont.systemFont(ofSize: size)
+    }
+    
+    private static func monoFont(size: CGFloat = 13) -> NSFont {
+        return NSFont.monospacedSystemFont(ofSize: size, weight: .regular)
+    }
+    #else
+    private static func boldFont(size: CGFloat = 17) -> UIFont {
+        return UIFont.boldSystemFont(ofSize: size)
+    }
+    
+    private static func italicFont(size: CGFloat = 17) -> UIFont {
+        return UIFont.italicSystemFont(ofSize: size)
+    }
+    
+    private static func boldItalicFont(size: CGFloat = 17) -> UIFont {
+        guard let descriptor = UIFont.systemFont(ofSize: size).fontDescriptor.withSymbolicTraits([.traitBold, .traitItalic]) else {
+            return UIFont.boldSystemFont(ofSize: size)
+        }
+        return UIFont(descriptor: descriptor, size: size)
+    }
+    
+    private static func regularFont(size: CGFloat = 17) -> UIFont {
+        return UIFont.systemFont(ofSize: size)
+    }
+    
+    private static func monoFont(size: CGFloat = 15) -> UIFont {
+        return UIFont.monospacedSystemFont(ofSize: size, weight: .regular)
+    }
+    #endif
+    
+    /// Parses inline formatting (bold, italic, code, links)
+    private static func parseInlineFormatting(_ text: String, isBold: Bool = false, isItalic: Bool = false) -> AttributedString {
+        var result = AttributedString()
+        var currentIndex = text.startIndex
+        
+        while currentIndex < text.endIndex {
+            // Check for inline code first (highest priority for escaping)
+            if text[currentIndex] == "`" {
+                if let endIndex = text[text.index(after: currentIndex)...].firstIndex(of: "`") {
+                    let codeStart = text.index(after: currentIndex)
+                    let codeContent = String(text[codeStart..<endIndex])
+                    var codeAttr = AttributedString(codeContent)
+                    #if os(macOS)
+                    codeAttr.font = Font(monoFont())
+                    #else
+                    codeAttr.font = Font(monoFont())
+                    #endif
+                    codeAttr.backgroundColor = codeBackgroundColor
+                    result.append(codeAttr)
+                    currentIndex = text.index(after: endIndex)
+                    continue
+                }
+            }
+            
+            // Check for bold (**text** or __text__)
+            if text[currentIndex] == "*" || text[currentIndex] == "_" {
+                let marker = text[currentIndex]
+                let nextIndex = text.index(after: currentIndex)
+                
+                if nextIndex < text.endIndex && text[nextIndex] == marker {
+                    // Potential bold
+                    let contentStart = text.index(after: nextIndex)
+                    if contentStart < text.endIndex, let endRange = findClosingMarker(in: text, from: contentStart, marker: String(repeating: String(marker), count: 2)) {
+                        let boldContent = String(text[contentStart..<endRange.lowerBound])
+                        let boldAttr = parseInlineFormatting(boldContent, isBold: true, isItalic: isItalic)
+                        result.append(boldAttr)
+                        currentIndex = endRange.upperBound
+                        continue
+                    }
+                } else if nextIndex < text.endIndex {
+                    // Potential italic
+                    let contentStart = nextIndex
+                    if let endRange = findClosingMarker(in: text, from: contentStart, marker: String(marker)) {
+                        let italicContent = String(text[contentStart..<endRange.lowerBound])
+                        let italicAttr = parseInlineFormatting(italicContent, isBold: isBold, isItalic: true)
+                        result.append(italicAttr)
+                        currentIndex = endRange.upperBound
+                        continue
+                    }
+                }
+            }
+            
+            // Check for links [text](url)
+            if text[currentIndex] == "[" {
+                if let linkResult = parseLink(in: text, from: currentIndex) {
+                    result.append(linkResult.attributedString)
+                    currentIndex = linkResult.endIndex
+                    continue
+                }
+            }
+            
+            // Regular character - apply accumulated styles
+            var charAttr = AttributedString(String(text[currentIndex]))
+            #if os(macOS)
+            if isBold && isItalic {
+                charAttr.font = Font(boldItalicFont())
+            } else if isBold {
+                charAttr.font = Font(boldFont())
+            } else if isItalic {
+                charAttr.font = Font(italicFont())
+            } else {
+                charAttr.font = Font(regularFont())
+            }
+            #else
+            if isBold && isItalic {
+                charAttr.font = Font(boldItalicFont())
+            } else if isBold {
+                charAttr.font = Font(boldFont())
+            } else if isItalic {
+                charAttr.font = Font(italicFont())
+            } else {
+                charAttr.font = Font(regularFont())
+            }
+            #endif
+            result.append(charAttr)
+            currentIndex = text.index(after: currentIndex)
+        }
+        
+        return result
+    }
+    
+    /// Finds a closing marker in the text
+    private static func findClosingMarker(in text: String, from startIndex: String.Index, marker: String) -> Range<String.Index>? {
+        guard startIndex < text.endIndex else { return nil }
+        
+        var searchIndex = startIndex
+        while searchIndex < text.endIndex {
+            if let range = text.range(of: marker, range: searchIndex..<text.endIndex) {
+                // Make sure it's not at the very start (empty content)
+                if range.lowerBound > startIndex {
+                    return range
+                }
+                searchIndex = text.index(after: range.lowerBound)
+            } else {
+                return nil
+            }
+        }
+        return nil
+    }
+    
+    /// Parses a markdown link and returns the attributed string and end index
+    private static func parseLink(in text: String, from startIndex: String.Index) -> (attributedString: AttributedString, endIndex: String.Index)? {
+        guard text[startIndex] == "[" else { return nil }
+        
+        let afterBracket = text.index(after: startIndex)
+        guard let closeBracket = text[afterBracket...].firstIndex(of: "]") else { return nil }
+        
+        let linkText = String(text[afterBracket..<closeBracket])
+        
+        let afterCloseBracket = text.index(after: closeBracket)
+        guard afterCloseBracket < text.endIndex, text[afterCloseBracket] == "(" else { return nil }
+        
+        let afterParen = text.index(after: afterCloseBracket)
+        guard let closeParen = text[afterParen...].firstIndex(of: ")") else { return nil }
+        
+        let urlString = String(text[afterParen..<closeParen])
+        
+        var linkAttr = AttributedString(linkText)
+        linkAttr.foregroundColor = .blue
+        linkAttr.underlineStyle = .single
+        if let url = URL(string: urlString) {
+            linkAttr.link = url
+        }
+        
+        return (linkAttr, text.index(after: closeParen))
     }
     
     // MARK: - Markdown to HTML
